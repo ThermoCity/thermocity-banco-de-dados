@@ -1,0 +1,272 @@
+-- =============================================================================
+-- ThermoCity — criação das tabelas (Oracle 19c+)
+-- Prefixo TMC_ = ThermoCity. Rode conectado no usuário que vai guardar os dados.
+--
+-- Ordem: território (ONDE) -> pessoas (QUEM) -> clima (QUANDO).
+-- Para apagar tudo: 02_apagar_tabelas.sql
+-- Cada comando termina em ";" no fim da linha (o carregar.py usa isso para dividir o arquivo).
+-- =============================================================================
+
+
+-- -----------------------------------------------------------------------------
+-- ONDE — território de Presidente Prudente
+-- -----------------------------------------------------------------------------
+
+-- Setor censitário do IBGE (Censo 2022) com população idosa e IPVS 2022 (Seade).
+CREATE TABLE TMC_SETOR (
+    CODIGO           VARCHAR2(15)   NOT NULL,
+    SITUACAO         VARCHAR2(255),
+    CD_SITUACAO      VARCHAR2(5),
+    CD_TIPO          VARCHAR2(5),
+    AREA_KM2         BINARY_DOUBLE,
+    CD_MUNICIPIO     VARCHAR2(7),
+    NM_MUNICIPIO     VARCHAR2(255),
+    CD_DISTRITO      VARCHAR2(9),
+    NM_DISTRITO      VARCHAR2(255),
+    CD_SUBDISTRITO   VARCHAR2(11),
+    NM_SUBDISTRITO   VARCHAR2(255),
+    CD_BAIRRO        VARCHAR2(255),
+    NM_BAIRRO        VARCHAR2(255),
+    POP_TOTAL        NUMBER(10),
+    POP_60_69        NUMBER(10),
+    POP_70_MAIS      NUMBER(10),
+    STATUS_CENSO     VARCHAR2(15),
+    IPVS_GRUPO       NUMBER(10),
+    IPVS_NOME        VARCHAR2(255),
+    IPVS_EDICAO      VARCHAR2(10),
+    IPVS_STATUS      VARCHAR2(15),
+    LAT_REFERENCIA   BINARY_DOUBLE,
+    LON_REFERENCIA   BINARY_DOUBLE,
+    GEOMETRIA_WKT    CLOB,
+    ATUALIZADO_EM    TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    CONSTRAINT PK_TMC_SETOR PRIMARY KEY (CODIGO),
+    CONSTRAINT CK_TMC_SETOR_STATUS_CENSO CHECK (STATUS_CENSO IN ('OK','SUPRIMIDO','SEM_REGISTRO','SEM_DADO')),
+    CONSTRAINT CK_TMC_SETOR_IPVS_GRUPO CHECK (IPVS_GRUPO BETWEEN 1 AND 6),
+    CONSTRAINT CK_TMC_SETOR_IPVS_STATUS CHECK (IPVS_STATUS IN ('OK','SUPRIMIDO','SEM_REGISTRO','SEM_DADO'))
+);
+
+COMMENT ON TABLE TMC_SETOR IS 'Setores censitarios de Presidente Prudente (IBGE, Censo 2022) com populacao 60+ e IPVS 2022';
+COMMENT ON COLUMN TMC_SETOR.STATUS_CENSO IS 'OK, SUPRIMIDO (sigilo do IBGE) ou SEM_REGISTRO. Ausente nunca vira zero';
+COMMENT ON COLUMN TMC_SETOR.LAT_REFERENCIA IS 'Ponto garantidamente dentro do setor, usado para medir distancias';
+COMMENT ON COLUMN TMC_SETOR.GEOMETRIA_WKT IS 'Poligono do setor em WKT, SIRGAS 2000 (EPSG:4674)';
+
+-- UBS (CNES) e possíveis refúgios climáticos (OpenStreetMap).
+CREATE TABLE TMC_SERVICO (
+    ID               VARCHAR2(40)   NOT NULL,
+    NOME             VARCHAR2(300),
+    TIPO             VARCHAR2(10)   NOT NULL,
+    CATEGORIA        VARCHAR2(255),
+    ENDERECO         VARCHAR2(300),
+    BAIRRO           VARCHAR2(255),
+    LAT              BINARY_DOUBLE,
+    LON              BINARY_DOUBLE,
+    FONTE            VARCHAR2(30),
+    ID_FONTE         VARCHAR2(40),
+    SETOR_CODIGO     VARCHAR2(15),
+    COORD_STATUS     VARCHAR2(20),
+    REVISAO          VARCHAR2(20),
+    MOTIVO_REVISAO   VARCHAR2(500),
+    CONSTRAINT PK_TMC_SERVICO PRIMARY KEY (ID),
+    CONSTRAINT FK_TMC_SERVICO_SETOR FOREIGN KEY (SETOR_CODIGO) REFERENCES TMC_SETOR (CODIGO),
+    CONSTRAINT CK_TMC_SERVICO_TIPO CHECK (TIPO IN ('UBS','REFUGIO')),
+    CONSTRAINT CK_TMC_SERVICO_COORD CHECK (COORD_STATUS IN ('OK','SEM_COORDENADA','FORA_MUNICIPIO')),
+    CONSTRAINT CK_TMC_SERVICO_REVISAO CHECK (REVISAO IN ('manter','potencial','revisar','remover','publico_alvo'))
+);
+
+CREATE INDEX IX_TMC_SERVICO_SETOR ON TMC_SERVICO (SETOR_CODIGO);
+COMMENT ON TABLE TMC_SERVICO IS 'UBS (CNES) e possiveis refugios climaticos (OpenStreetMap) de Presidente Prudente';
+COMMENT ON COLUMN TMC_SERVICO.REVISAO IS 'So refugios. manter = publico confirmado. potencial = templos e shoppings. revisar e remover nunca sao sugeridos';
+
+-- Calor relativo de cada setor (Landsat 8, cena de verão), feature "Mapa de Calor por Setor".
+CREATE TABLE TMC_CALOR_SETOR (
+    CODIGO_SETOR         VARCHAR2(15)   NOT NULL,
+    LST_VERAO_C          BINARY_DOUBLE,
+    NDVI_MEDIO           BINARY_DOUBLE,
+    PCT_CONSTRUCOES      BINARY_DOUBLE,
+    PCT_VEGETACAO_DENSA  BINARY_DOUBLE,
+    TA_ESTIMADA_C        BINARY_DOUBLE,
+    CLASSE_CALOR         NUMBER(10),
+    PIXELS_VALIDOS       NUMBER(10),
+    CENA_LANDSAT         VARCHAR2(60),
+    DATA_CENA            DATE,
+    STATUS               VARCHAR2(15),
+    ATUALIZADO_EM        TIMESTAMP(6) WITH TIME ZONE DEFAULT SYSTIMESTAMP,
+    CONSTRAINT PK_TMC_CALOR_SETOR PRIMARY KEY (CODIGO_SETOR),
+    CONSTRAINT FK_TMC_CALOR_SETOR_SETOR FOREIGN KEY (CODIGO_SETOR) REFERENCES TMC_SETOR (CODIGO),
+    CONSTRAINT CK_TMC_CALOR_CLASSE CHECK (CLASSE_CALOR BETWEEN 1 AND 5),
+    CONSTRAINT CK_TMC_CALOR_STATUS CHECK (STATUS IN ('OK','SEM_DADO'))
+);
+
+COMMENT ON TABLE TMC_CALOR_SETOR IS 'Calor relativo por setor a partir da temperatura de superficie do Landsat (cena de verao)';
+COMMENT ON COLUMN TMC_CALOR_SETOR.CLASSE_CALOR IS 'Quintis da temperatura de superficie: 1 = 20% mais frescos, 5 = 20% mais quentes. Nao e nivel NC';
+COMMENT ON COLUMN TMC_CALOR_SETOR.LST_VERAO_C IS 'Temperatura media da SUPERFICIE (chao e telhados) as 10h20 do dia da cena. Nao e temperatura do ar';
+COMMENT ON COLUMN TMC_CALOR_SETOR.TA_ESTIMADA_C IS 'Temperatura do ar pelo modelo Amorim, Dubreuil e Cardoso (2015). So para comparar setores';
+
+
+-- -----------------------------------------------------------------------------
+-- QUEM — cadastro FICTÍCIO de pessoas 60+ (gerado pela base-territorial-api)
+-- -----------------------------------------------------------------------------
+
+-- Incremento 50 = allocationSize do Hibernate na entidade PessoaSintetica.
+CREATE SEQUENCE TMC_SEQ_PESSOA_SINTETICA START WITH 1 INCREMENT BY 50;
+
+CREATE TABLE TMC_PESSOA_SINTETICA (
+    ID                    NUMBER(19)     NOT NULL,
+    NOME                  VARCHAR2(120)  NOT NULL,
+    IDADE                 NUMBER(10),
+    FAIXA_ETARIA          VARCHAR2(10),
+    SEXO                  VARCHAR2(1),
+    SETOR_CODIGO          VARCHAR2(15)   NOT NULL,
+    LAT                   BINARY_DOUBLE,
+    LON                   BINARY_DOUBLE,
+    MORA_SOZINHO          NUMBER(1)      DEFAULT 0 NOT NULL,
+    MOBILIDADE_REDUZIDA   NUMBER(1)      DEFAULT 0 NOT NULL,
+    CONDICAO_CRONICA      NUMBER(1)      DEFAULT 0 NOT NULL,
+    TELEFONE              VARCHAR2(30),
+    CONTATO_REF_NOME      VARCHAR2(120),
+    CONTATO_REF_TELEFONE  VARCHAR2(30),
+    UBS_REF_ID            VARCHAR2(40),
+    UBS_REF_NOME          VARCHAR2(300),
+    CONSENTIMENTO_LGPD    NUMBER(1)      DEFAULT 0 NOT NULL,
+    CONSENTIMENTO_EM      TIMESTAMP(6) WITH TIME ZONE,
+    SINTETICO             NUMBER(1)      DEFAULT 1 NOT NULL,
+    SEMENTE               NUMBER(19),
+    GERADO_EM             TIMESTAMP(6) WITH TIME ZONE,
+    CONSTRAINT PK_TMC_PESSOA_SINTETICA PRIMARY KEY (ID),
+    CONSTRAINT FK_TMC_PESSOA_SETOR FOREIGN KEY (SETOR_CODIGO) REFERENCES TMC_SETOR (CODIGO),
+    CONSTRAINT FK_TMC_PESSOA_UBS FOREIGN KEY (UBS_REF_ID) REFERENCES TMC_SERVICO (ID),
+    CONSTRAINT CK_TMC_PESSOA_SEXO CHECK (SEXO IN ('F','M')),
+    CONSTRAINT CK_TMC_PESSOA_FAIXA CHECK (FAIXA_ETARIA IN ('60-69','70+')),
+    CONSTRAINT CK_TMC_PESSOA_BOOL CHECK (MORA_SOZINHO IN (0,1) AND MOBILIDADE_REDUZIDA IN (0,1)
+        AND CONDICAO_CRONICA IN (0,1) AND CONSENTIMENTO_LGPD IN (0,1) AND SINTETICO IN (0,1))
+);
+
+CREATE INDEX IX_TMC_PESSOA_SETOR ON TMC_PESSOA_SINTETICA (SETOR_CODIGO);
+CREATE INDEX IX_TMC_PESSOA_UBS ON TMC_PESSOA_SINTETICA (UBS_REF_ID);
+COMMENT ON TABLE TMC_PESSOA_SINTETICA IS 'Pessoas 60+ FICTICIAS para testar a busca ativa. Taxas de vulnerabilidade PROVISORIAS';
+
+
+-- -----------------------------------------------------------------------------
+-- QUANDO — clima da estação INMET A707 e níveis de calor NC1–NC5
+-- -----------------------------------------------------------------------------
+
+-- Regras NC1–NC5 versionadas.
+CREATE TABLE TMC_LIMIAR_NIVEL_CALOR (
+    ID_LIMIAR       NUMBER GENERATED BY DEFAULT AS IDENTITY,
+    VERSAO_LIMIAR   VARCHAR2(40)   NOT NULL,
+    NIVEL           NUMBER(1)      NOT NULL,
+    NOME_NIVEL      VARCHAR2(20)   NOT NULL,
+    IC_MIN_C        NUMBER(5,2),
+    IC_MAX_C        NUMBER(5,2),
+    DURACAO_DIAS    NUMBER(2)      NOT NULL,
+    PERCENTIL       NUMBER(5,2),
+    REGRA           VARCHAR2(300)  NOT NULL,
+    ACAO_ESPERADA   VARCHAR2(400)  NOT NULL,
+    ATIVO           CHAR(1)        DEFAULT 'S' NOT NULL,
+    CRIADO_EM       TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    CONSTRAINT PK_TMC_LIMIAR_NIVEL_CALOR PRIMARY KEY (ID_LIMIAR),
+    CONSTRAINT UK_TMC_LIMIAR_NC UNIQUE (VERSAO_LIMIAR, NIVEL, DURACAO_DIAS),
+    CONSTRAINT CK_TMC_LIMIAR_NIVEL CHECK (NIVEL BETWEEN 1 AND 5),
+    CONSTRAINT CK_TMC_LIMIAR_ATIVO CHECK (ATIVO IN ('S','N'))
+);
+
+COMMENT ON TABLE TMC_LIMIAR_NIVEL_CALOR IS 'Regras NC1-NC5 do indice de calor maximo diario, versionadas, com a acao esperada';
+
+-- Leituras horárias (observação) e previsões.
+CREATE TABLE TMC_LEITURA_CLIMA (
+    ID_LEITURA             NUMBER GENERATED BY DEFAULT AS IDENTITY,
+    DATA_HORA_UTC          TIMESTAMP WITH TIME ZONE NOT NULL,
+    DATA_LOCAL             DATE          NOT NULL,
+    FONTE                  VARCHAR2(20)  NOT NULL,
+    TIPO                   VARCHAR2(10)  NOT NULL,
+    DATA_EMISSAO_PREVISAO  TIMESTAMP WITH TIME ZONE,
+    HORIZONTE_H            NUMBER(4),
+    PRECIPITACAO_MM        NUMBER(6,2),
+    PRESSAO_HPA            NUMBER(6,1),
+    PRESSAO_MAX_HORA_HPA   NUMBER(6,1),
+    PRESSAO_MIN_HORA_HPA   NUMBER(6,1),
+    RADIACAO_KJ_M2         NUMBER(8,1),
+    TEMPERATURA_C          NUMBER(4,1),
+    PONTO_ORVALHO_C        NUMBER(4,1),
+    TEMP_MAX_HORA_C        NUMBER(4,1),
+    TEMP_MIN_HORA_C        NUMBER(4,1),
+    ORVALHO_MAX_HORA_C     NUMBER(4,1),
+    ORVALHO_MIN_HORA_C     NUMBER(4,1),
+    UMIDADE_MAX_HORA_PCT   NUMBER(3),
+    UMIDADE_MIN_HORA_PCT   NUMBER(3),
+    UMIDADE_PCT            NUMBER(3),
+    VENTO_DIRECAO_GRAUS    NUMBER(3),
+    VENTO_RAJADA_MS        NUMBER(5,1),
+    VENTO_VELOCIDADE_MS    NUMBER(5,1),
+    INDICE_CALOR_C         NUMBER(5,2),
+    QUALIDADE              VARCHAR2(12)  NOT NULL,
+    CONSTRAINT PK_TMC_LEITURA_CLIMA PRIMARY KEY (ID_LEITURA),
+    CONSTRAINT CK_TMC_LEITURA_FONTE CHECK (FONTE IN ('INMET','OPENWEATHER')),
+    CONSTRAINT CK_TMC_LEITURA_TIPO CHECK (TIPO IN ('OBSERVACAO','PREVISAO')),
+    CONSTRAINT CK_TMC_LEITURA_QUALIDADE CHECK (QUALIDADE IN ('OK','PARCIAL','FORA_FAIXA'))
+);
+
+-- Oracle não aceita UNIQUE direto em TIMESTAMP WITH TIME ZONE (ORA-02329): índice por função.
+CREATE UNIQUE INDEX UK_TMC_LEITURA_CLIMA ON TMC_LEITURA_CLIMA (FONTE, TIPO, SYS_EXTRACT_UTC(DATA_HORA_UTC), SYS_EXTRACT_UTC(DATA_EMISSAO_PREVISAO));
+CREATE INDEX IX_TMC_LEITURA_CLIMA_DATA ON TMC_LEITURA_CLIMA (DATA_LOCAL, FONTE, TIPO);
+COMMENT ON TABLE TMC_LEITURA_CLIMA IS 'Leituras horarias da estacao INMET A707 e previsoes. Ausente = NULL, nunca -9999';
+COMMENT ON COLUMN TMC_LEITURA_CLIMA.INDICE_CALOR_C IS 'Rothfusz (NWS) a partir de TEMPERATURA_C e UMIDADE_PCT. Abaixo de 80 F = temperatura';
+COMMENT ON COLUMN TMC_LEITURA_CLIMA.QUALIDADE IS 'OK = temperatura e umidade validas. PARCIAL = falta temperatura ou umidade. FORA_FAIXA = valor implausivel';
+
+-- Agregados diários (dia local, UTC-3) para análise e ML.
+CREATE TABLE TMC_RESUMO_DIARIO_CLIMA (
+    DATA_LOCAL            DATE          NOT NULL,
+    FONTE                 VARCHAR2(20)  NOT NULL,
+    TIPO                  VARCHAR2(10)  NOT NULL,
+    IC_MAX_C              NUMBER(5,2),
+    HORA_LOCAL_IC_MAX     NUMBER(2),
+    TEMP_NO_PICO_C        NUMBER(4,1),
+    UR_NO_PICO_PCT        NUMBER(3),
+    IC_MEDIO_C            NUMBER(5,2),
+    HORAS_IC_GE_35        NUMBER(2),
+    HORAS_IC_GE_36        NUMBER(2),
+    TEMP_MAX_C            NUMBER(4,1),
+    TEMP_MIN_C            NUMBER(4,1),
+    TEMP_MEDIA_C          NUMBER(4,1),
+    UR_MIN_PCT            NUMBER(3),
+    UR_MEDIA_PCT          NUMBER(4,1),
+    CHUVA_TOTAL_MM        NUMBER(6,1),
+    RADIACAO_TOTAL_KJ_M2  NUMBER(9,1),
+    VENTO_MEDIO_MS        NUMBER(4,1),
+    RAJADA_MAX_MS         NUMBER(5,1),
+    DIAS_CONSEC_NC2       NUMBER(3),
+    HORAS_COM_DADO        NUMBER(2)     NOT NULL,
+    HORAS_VALIDAS         NUMBER(2)     NOT NULL,
+    DIA_VALIDO            CHAR(1)       NOT NULL,
+    CONSTRAINT PK_TMC_RESUMO_DIARIO_CLIMA PRIMARY KEY (DATA_LOCAL, FONTE, TIPO),
+    CONSTRAINT CK_TMC_RESUMO_DIA_VALIDO CHECK (DIA_VALIDO IN ('S','N'))
+);
+
+COMMENT ON TABLE TMC_RESUMO_DIARIO_CLIMA IS 'Agregados diarios (dia local UTC-3) para analise e ML';
+COMMENT ON COLUMN TMC_RESUMO_DIARIO_CLIMA.DIA_VALIDO IS 'S se tiver pelo menos 18 h validas e 4 h validas entre 12h e 17h locais';
+
+-- Nível NC1–NC5 de cada dia válido.
+CREATE TABLE TMC_NIVEL_CALOR (
+    ID_NIVEL        NUMBER GENERATED BY DEFAULT AS IDENTITY,
+    DATA_LOCAL      DATE          NOT NULL,
+    NIVEL           NUMBER(1)     NOT NULL,
+    NOME_NIVEL      VARCHAR2(20)  NOT NULL,
+    IC_MAX_C        NUMBER(5,2)   NOT NULL,
+    ORIGEM          VARCHAR2(10)  NOT NULL,
+    FONTE           VARCHAR2(20)  NOT NULL,
+    VERSAO_LIMIAR   VARCHAR2(40)  NOT NULL,
+    ID_LEITURA      NUMBER,
+    ID_LIMIAR       NUMBER,
+    CALCULADO_EM    TIMESTAMP WITH TIME ZONE DEFAULT SYSTIMESTAMP NOT NULL,
+    CONSTRAINT PK_TMC_NIVEL_CALOR PRIMARY KEY (ID_NIVEL),
+    CONSTRAINT UK_TMC_NIVEL_CALOR UNIQUE (DATA_LOCAL, ORIGEM, FONTE, VERSAO_LIMIAR),
+    CONSTRAINT FK_TMC_NIVEL_LEITURA FOREIGN KEY (ID_LEITURA) REFERENCES TMC_LEITURA_CLIMA (ID_LEITURA),
+    CONSTRAINT FK_TMC_NIVEL_LIMIAR FOREIGN KEY (ID_LIMIAR) REFERENCES TMC_LIMIAR_NIVEL_CALOR (ID_LIMIAR),
+    CONSTRAINT CK_TMC_NIVEL_NIVEL CHECK (NIVEL BETWEEN 1 AND 5),
+    CONSTRAINT CK_TMC_NIVEL_ORIGEM CHECK (ORIGEM IN ('OBSERVADO','PREVISTO'))
+);
+
+CREATE INDEX IX_TMC_NIVEL_CALOR_DATA ON TMC_NIVEL_CALOR (DATA_LOCAL);
+CREATE INDEX IX_TMC_NIVEL_LEITURA ON TMC_NIVEL_CALOR (ID_LEITURA);
+CREATE INDEX IX_TMC_NIVEL_LIMIAR ON TMC_NIVEL_CALOR (ID_LIMIAR);
+COMMENT ON TABLE TMC_NIVEL_CALOR IS 'Nivel NC1-NC5 por dia, calculado pelos limiares da VERSAO_LIMIAR';
