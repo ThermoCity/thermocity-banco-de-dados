@@ -272,3 +272,150 @@ Convenções:
   recalculados.
 - **Tabela nova:** coloque o `CREATE TABLE` em `sql/01_criar_tabelas.sql` com o prefixo `TMC_` e o
   `DROP` em `sql/02_apagar_tabelas.sql`. Os testes conferem os dois.
+
+## Regras de negócio em PL/SQL e transição para o MongoDB (épico 83)
+
+Entrega de **Mastering Relational and Non-Relational Database**: as regras da busca ativa do
+ThermoCity implementadas no Oracle (funções, procedimentos, gatilhos e pacotes) e parte do território
+representada no MongoDB, com os mesmos relatórios nos dois bancos.
+
+**O problema (CitizenTech):** em dia de calor extremo, idosos que moram sozinhos ou têm doença crônica
+correm risco e raramente pedem ajuda. O ThermoCity gera, para cada UBS, a lista do dia de quem o
+agente de saúde deve ligar primeiro, com o motivo de cada escolha, e registra o resultado do contato.
+
+### Como executar
+
+Oracle (SQL Developer, F5 em cada arquivo, ou SQLcl/SQL*Plus):
+
+```sql
+-- usuário limpo
+@sql/01_criar_tabelas.sql            -- tabelas base (ou: py carga\carregar.py, que também carrega os dados)
+@sql/regras/00_executar_tudo.sql     -- tabelas do épico, dados de teste, pacotes, gatilhos, blocos e testes
+@sql/regras/08_relatorios_oracle.sql -- relatórios equivalentes aos do MongoDB (precisa da carga completa)
+@sql/regras/99_apagar_regras.sql     -- desfaz o épico, para rodar de novo do zero
+```
+
+MongoDB (mongosh, Atlas ou local):
+
+```bash
+mongosh "<sua conexão>" mongodb/01_carga.js       # database thermocity, 2 coleções, 611 documentos
+mongosh "<sua conexão>" mongodb/02_relatorios.js  # 3 relatórios (1 agregação)
+```
+
+Os dados de teste e a carga do MongoDB são gerados dos mesmos CSVs (`dados/territorio`) por
+`py carga\gerar_epico_banco.py`. Testes sem banco: `py -m unittest discover -s testes -v`.
+
+```
+sql/regras/
+  00_executar_tudo.sql      roda 01 a 07 em sequência
+  01_tabelas_busca_ativa.sql TMC_LISTA_BUSCA, TMC_ITEM_LISTA, TMC_CONTATO, TMC_AUDITORIA_PESSOA
+  02_dados_teste.sql        território mínimo + 11 pessoas FICTÍCIAS + níveis de 23 e 24/11/2026 (gerado)
+  03_pkg_priorizacao.sql    pacote PKG_PRIORIZACAO (spec e body)
+  04_pkg_contato.sql        pacote PKG_CONTATO (spec e body)
+  05_gatilhos.sql           auditoria LGPD e atualização do item da lista
+  06_blocos_anonimos.sql    2 blocos com cursor, repetição e decisão
+  07_testes.sql             16 casos com OK/FALHOU; desfaz tudo no fim
+  08_relatorios_oracle.sql  consultas equivalentes aos relatórios do MongoDB
+  99_apagar_regras.sql      remove os objetos e os dados de teste do épico
+mongodb/
+  01_carga.js               database, createCollection, insertMany e índices (gerado)
+  02_relatorios.js          find e aggregate
+```
+
+### Modelo Oracle
+
+```
+TMC_SETOR 1 ──< TMC_PESSOA_SINTETICA >── 1 TMC_SERVICO (UBS)
+                    │ 1                        │ 1
+                    │                          │
+                    ├──< TMC_ITEM_LISTA >── 1 TMC_LISTA_BUSCA (dia × UBS)
+                    │        │ 1
+                    └──< TMC_CONTATO >┘  (contato liga a pessoa ao item da lista)
+
+TMC_AUDITORIA_PESSOA: uma linha por INSERT, UPDATE ou DELETE em TMC_PESSOA_SINTETICA
+```
+
+### Objetos PL/SQL
+
+| Requisito | Objeto | Regra real do ThermoCity |
+|---|---|---|
+| Função | `PKG_PRIORIZACAO.FN_PONTUACAO` | Pontuação 0–16 da pessoa (regra v1): mora sozinho +3, mobilidade +2, crônica +2, 70+ +2, nota de calor − 1, IPVS 5–6 +2 / 4 +1, refúgio a mais de 800 m +1 |
+| Função | `PKG_PRIORIZACAO.FN_NIVEL_VIGENTE` | Nível NC1–NC5 do dia (prefere observado a previsto) |
+| Função | `PKG_CONTATO.FN_COBERTURA_UBS` | % das pessoas da lista da UBS que já tiveram contato |
+| Procedimento | `PKG_PRIORIZACAO.PRC_GERAR_LISTA_DIA` | Gera a lista do dia por UBS: alcance pelo nível (NC3 70+ em IPVS 5–6, NC4 60+ em IPVS 4–6, NC5 todos), ordem por pontuação, idade e id; NC1–NC2 encerram as listas |
+| Procedimento | `PKG_CONTATO.PRC_REGISTRAR_CONTATO` | Valida pessoa, resultado e observação e grava o contato, ligado ao item da lista aberta |
+| Gatilho de auditoria | `TRG_TMC_PESSOA_AUDITORIA` | LGPD: data, operação, usuário, valores antigos e novos de cada alteração de pessoa |
+| Gatilho de regra | `TRG_TMC_CONTATO_ATUALIZA_ITEM` | O contato registrado muda o status do item (ex.: `PRECISA_AJUDA`) |
+| Pacotes | `PKG_PRIORIZACAO`, `PKG_CONTATO` | Specification e body separados |
+| Blocos | `06_blocos_anonimos.sql` | Bloco 1: cursor explícito + LOOP + IF/ELSIF classifica os 420 setores. Bloco 2: CASE pelo nível do dia + FOR com cursor imprime as listas |
+
+Erros de aplicação: `-20001` pessoa não encontrada (priorização), `-20002` dia sem nível, `-20003` nível
+fora de 1–5, `-20010` pessoa não encontrada (contato), `-20011` resultado inválido, `-20012` observação
+acima de 1000 caracteres. As rotinas não fazem `COMMIT`: quem chama decide.
+
+**Dados de teste:** 11 pessoas **fictícias** (ids 900001 a 900011, telefones `+55 18 0000-XXXX`, não
+discáveis) em 7 setores reais, ligadas a 2 UBS reais (ESF Parque Alvorada e UBS Centro). O dia
+24/11/2026 tem NC4 e o dia 23/11/2026 tem NC2, com `FONTE = 'DEMONSTRACAO'` (não é dado do INMET).
+
+**Testes (`07_testes.sql`):** 16 casos, entre eles a pontuação da Maria (78 anos, mora sozinha, setor
+nota 5) = 14, a ordem da lista da UBS Parque Alvorada, os erros `-20001`, `-20003`, `-20010` e
+`-20011` sem gravar nada, o gatilho mudando o item para `PRECISA_AJUDA`, a auditoria do UPDATE de
+telefone e do DELETE, o NC2 encerrando as listas e os pacotes `VALID` em `USER_OBJECTS`.
+
+Saída esperada do bloco 1 (com a carga completa do território): 23 setores críticos (993 pessoas 70+),
+167 em atenção e 230 em rotina.
+
+### Mapeamento Oracle → MongoDB
+
+| Oracle | MongoDB | Decisão |
+|---|---|---|
+| `TMC_SETOR` (1 linha) | `setores` (1 documento), `_id` = `CODIGO` | Coleção principal do território |
+| `TMC_CALOR_SETOR` (1:1 com o setor) | subdocumento `setores.calor` | **Incorporado:** é sempre lido junto com o setor e não existe sem ele |
+| `POP_*`, `STATUS_CENSO` | subdocumento `setores.populacao` (+ `idosos_60_mais`) | Incorporado: atributos do próprio setor agrupados |
+| `IPVS_*` | subdocumento `setores.ipvs` | Incorporado |
+| `LAT_REFERENCIA`, `LON_REFERENCIA` | `setores.ponto_referencia` (GeoJSON Point) | Formato geográfico nativo |
+| `TMC_SERVICO` | `servicos`, `_id` = `ID` | **Referenciado:** um setor tem vários serviços, e UBS e refúgios são consultados sozinhos (refúgio mais próximo, lista de UBS) |
+| `TMC_SERVICO.SETOR_CODIGO` (FK) | `servicos.setor_codigo` | Referência ao `_id` de `setores` |
+| `TMC_SERVICO.LAT/LON` | `servicos.localizacao` (GeoJSON) + índice `2dsphere` | Permite `$near` no futuro |
+| `NULL` | `null` | Ausente continua ausente, nunca zero |
+
+A geometria (`GEOMETRIA_WKT`) ficou fora do MongoDB: os relatórios não usam o polígono.
+
+### Relatórios: MongoDB × Oracle
+
+Cada relatório tem a consulta MongoDB em `mongodb/02_relatorios.js` e a SQL equivalente em
+`sql/regras/08_relatorios_oracle.sql`. Os resultados abaixo foram calculados dos CSVs que alimentam os
+dois bancos; ao rodar, cole os prints das duas saídas como evidência.
+
+**1. Setores e população 60+ por nota de calor** (MongoDB: `aggregate` com `$group`; Oracle: `GROUP BY`)
+
+| Nota de calor | Setores | Pessoas 60+ | Pessoas 70+ | Temperatura média da superfície (°C) |
+|---|---|---|---|---|
+| 1 | 84 | 5.668 | 2.482 | 42,31 |
+| 2 | 84 | 8.471 | 3.876 | 44,93 |
+| 3 | 84 | 9.158 | 4.360 | 45,75 |
+| 4 | 84 | 10.408 | 4.986 | 46,41 |
+| 5 | 84 | 10.334 | 4.644 | 47,49 |
+
+**2. Refúgios públicos confirmados** (MongoDB: `find({ tipo: "REFUGIO", revisao: "manter" })`; Oracle: `WHERE TIPO = 'REFUGIO' AND REVISAO = 'manter'`), 10 resultados:
+Biblioteca Municipal Doutor Abelardo de Cerqueira César · CREAS 1 · Centro Cultural Matarazzo · Centro de
+Encontro da Terceira Idade Dalila de Almeida Campos · Fundo Social · Meridional Shopping · Oficina Cultural
+Regional Timochenco Wehbi · Prudenshopping · SEST/SENAT · Serviço Social do Comércio de Presidente Prudente.
+
+**3. Top 10 setores críticos (nota de calor 5 e IPVS ≥ 4) por pessoas 70+** (MongoDB: `find` + `sort` + `limit`; Oracle: `ORDER BY ... FETCH FIRST 10`)
+
+| Setor | IPVS | 70+ | 60–69 | Superfície (°C) |
+|---|---|---|---|---|
+| 354140605000099 | 4 | 102 | 83 | 47,0 |
+| 354140605000231 | 4 | 80 | 71 | 47,4 |
+| 354140605000229 | 5 | 66 | 66 | 48,1 |
+| 354140605000199 | 4 | 65 | 79 | 47,1 |
+| 354140605000232 | 5 | 63 | 71 | 47,0 |
+| 354140605000195 | 4 | 62 | 73 | 47,2 |
+| 354140605000174 | 5 | 58 | 89 | 47,9 |
+| 354140605000233 | 4 | 50 | 64 | 46,9 |
+| 354140610000001 | 4 | 48 | 43 | 48,0 |
+| 354140605000234 | 4 | 46 | 49 | 46,9 |
+
+Correspondência: 420 linhas em `TMC_SETOR` = 420 documentos em `setores`; 191 linhas em `TMC_SERVICO` =
+191 documentos em `servicos` (consulta 0 dos dois scripts).
